@@ -1,0 +1,18 @@
+{
+  "name": "taobao-shangou-daily-report",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "淘宝闪购服务商批量昨日日报生成工具",
+  "scripts": {
+    "test": "node --test isv-daily-report.test.mjs isv-report-lib.test.mjs cloud/async-control.test.mjs cloud/report-gateway.test.mjs cloud/public/index.test.mjs",
+    "start": "node isv-daily-report.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5"
+  }
+}

@@ -1,0 +1,13 @@
+.env
+cloud/.env
+data/shops.json
+data/reports/
+data/gateway-metrics.json
+logs/
+node_modules/
+.playwright-cli/
+output/
+*.log
+*.err.log
+notes.md
+task_plan.md
