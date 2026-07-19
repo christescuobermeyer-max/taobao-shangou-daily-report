@@ -6,16 +6,24 @@ import vm from 'node:vm';
 
 const html = readFileSync(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
 const markup = /<body[^>]*>([\s\S]*?)<\/body>/.exec(html)?.[1] || '';
+const visibleMarkup = markup.replace(/<script[\s\S]*?<\/script>/gi, '');
 const heroMarkup = /<section class=["']hero["']>([\s\S]*?)<\/section>/.exec(markup)?.[1] || '';
 
 test('page contains the queue gateway summary, own task, and active task list', () => {
   for (const id of ['gateway', 'gatewayCurrent', 'gatewayGenerating', 'gatewayWaiting', 'gatewayAverage', 'myJob', 'gatewayJobs']) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
-  assert.match(html, /日报生成网关/);
-  assert.match(html, /我的日报/);
+  assert.match(html, /日报生成进度/);
+  assert.match(html, /本次日报/);
   assert.match(markup, /<section class=["']hero["'][\s\S]*?<\/section>\s*<section id=["']gateway["'] class=["']panel gateway gateway-panel/);
   assert.doesNotMatch(heroMarkup, /id=["']gateway["']/);
+});
+
+test('user-facing copy hides internal implementation terms', () => {
+  assert.doesNotMatch(visibleMarkup, /Cookie|API Key|Cloud Session|日报生成网关|门店 ID|服务端|大模型/);
+  assert.match(visibleMarkup, /安全读取/);
+  assert.match(visibleMarkup, /日报生成进度/);
+  assert.match(visibleMarkup, /门店编号/);
 });
 
 test('report requests carry a generated requestId and gateway polling is non-overlapping', () => {
