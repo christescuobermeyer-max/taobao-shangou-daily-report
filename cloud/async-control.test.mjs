@@ -80,3 +80,13 @@ test('keyed deduper clears a failed operation so it can be retried', async () =>
   }), 'ok');
   assert.equal(calls, 2);
 });
+
+test('keyed deduper runs a completed operation again for a later request', async () => {
+  const deduper = createKeyedDeduper();
+  let calls = 0;
+  const operation = async () => ++calls;
+
+  assert.equal(await deduper.run('shop-daily', operation), 1);
+  assert.equal(await deduper.run('shop-daily', operation), 2);
+  assert.equal(deduper.size(), 0);
+});

@@ -1,11 +1,11 @@
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildReportModelInput,
   connectChromePage,
-  fetchShopReportData,
+  fetchDailyReportData,
   fetchWeeklyReportData,
   fetchShopRow,
   formatPeriodDataCell,
@@ -23,15 +23,12 @@ import { createReportGateway, isValidRequestId } from './report-gateway.mjs';
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
 const DATA_DIR = resolve(process.env.DATA_DIR || join(APP_DIR, 'data'));
-const REPORT_DIR = join(DATA_DIR, 'reports');
 const ENV_PATH = resolve(process.env.ENV_FILE || join(APP_DIR, '.env'));
 const STORE_URL = 'https://open.shop.ele.me/manager/base/store-analysis';
 const MAX_BODY_BYTES = 64 * 1024;
 const DEFAULT_PORT = 8792;
 const DEFAULT_CDP_PORT = 9222;
 const LOGIN_FAILURE_TEXT = /login|signin|登录|授权|失效/i;
-
-mkdirSync(REPORT_DIR, { recursive: true, mode: 0o700 });
 
 const env = { ...loadDotEnv(ENV_PATH), ...process.env };
 const config = {
@@ -251,54 +248,6 @@ function validateRequestedDate(period, bodyDate) {
   }
 }
 
-function cachePath(shopId, period) {
-  if (period.reportType === 'weekly') {
-    return join(REPORT_DIR, `weekly-${shopId}-${period.beginDate}-${period.endDate}.json`);
-  }
-  return join(REPORT_DIR, `daily-${shopId}-${period.endDate}.json`);
-}
-
-function readCachedReport(shop, period) {
-  const paths = [cachePath(shop.shopId, period)];
-  for (const filePath of paths) {
-    if (!existsSync(filePath)) continue;
-    try {
-      const cached = JSON.parse(readFileSync(filePath, 'utf8'));
-      const cachedType = cached.reportType || 'daily';
-      const requestedBegin = cached.requestedBeginDate;
-      const requestedEnd = cached.requestedEndDate;
-      const periodData = cached.periodData || cached.yesterdayData || cached.weeklyData;
-      if (cached.shopId === shop.shopId && cachedType === period.reportType
-        && requestedBegin === period.beginDate && requestedEnd === period.endDate
-        && cached.report && periodData) {
-        const actualPeriod = {
-          reportType: cachedType,
-          periodLabel: cached.periodLabel || (cachedType === 'weekly' ? '近7日' : '昨日'),
-          dateType: cachedType === 'weekly' ? 'recent_7d' : 'day',
-          beginDate: cached.beginDate || cached.date,
-          endDate: cached.endDate || cached.date,
-        };
-        return publicResult(shop, actualPeriod, periodData, cached.report);
-      }
-    } catch {
-      // Ignore damaged cache files and regenerate the report.
-    }
-  }
-  return null;
-}
-
-function writeCachedReport(value, requestedPeriod) {
-  const filePath = cachePath(value.shopId, requestedPeriod);
-  const tempPath = `${filePath}.tmp-${process.pid}`;
-  const stored = {
-    ...value,
-    requestedBeginDate: requestedPeriod.beginDate,
-    requestedEndDate: requestedPeriod.endDate,
-  };
-  writeFileSync(tempPath, JSON.stringify(stored, null, 2), { mode: 0o600 });
-  renameSync(tempPath, filePath);
-}
-
 function publicResult(shop, period, periodData, report) {
   const result = {
     shopId: shop.shopId,
@@ -325,7 +274,7 @@ async function createReport(shop, requestedPeriod, taskKey) {
       const session = await ensureSession();
       return requestedPeriod.reportType === 'weekly'
         ? fetchWeeklyReportData(session, shop.shopId, config.browserTimeoutMs, requestedPeriod)
-        : fetchShopReportData(session, shop.shopId, config.browserTimeoutMs, requestedPeriod);
+        : fetchDailyReportData(session, shop.shopId, config.browserTimeoutMs, requestedPeriod);
     });
     const rawRow = captured?.row || null;
     const period = captured?.period || requestedPeriod;
@@ -353,7 +302,6 @@ async function createReport(shop, requestedPeriod, taskKey) {
     });
     if (!report || !String(report).trim()) throw new Error('大模型返回空报告');
     const result = publicResult(shop, period, periodData, String(report).trim());
-    writeCachedReport(result, requestedPeriod);
     reportGateway.transition(taskKey, 'completed');
     return result;
   } catch (error) {
@@ -366,15 +314,8 @@ async function createReport(shop, requestedPeriod, taskKey) {
   }
 }
 
-function createOrReadReport(shop, period, taskKey) {
-  return reportDeduper.run(taskKey, async () => {
-    const cached = readCachedReport(shop, period);
-    if (cached) {
-      reportGateway.transition(taskKey, 'cache_hit');
-      return cached;
-    }
-    return createReport(shop, period, taskKey);
-  });
+function createFreshReport(shop, period, taskKey) {
+  return reportDeduper.run(taskKey, () => createReport(shop, period, taskKey));
 }
 
 async function performHealthCheck() {
@@ -383,11 +324,10 @@ async function performHealthCheck() {
   if (!page.hasSearch) throw new Error('服务商页面缺少搜索门店名称/ID输入框');
   const probeShops = [...shops.keys()].slice(0, 3);
   let probe = null;
-  const period = resolveReportPeriod('daily');
   for (let index = 0; index < probeShops.length; index += 1) {
     const candidateIndex = (state.healthProbeOffset + index) % probeShops.length;
     const shopId = probeShops[candidateIndex];
-    const row = await fetchShopRow(session, shopId, 20000, period);
+    const row = await fetchShopRow(session, shopId, 20000);
     if (row && String(row.shop_id || row.shopId || '') === shopId) {
       probe = shopId;
       state.healthProbeOffset = (candidateIndex + 1) % probeShops.length;
@@ -533,7 +473,7 @@ async function handleRequest(request, response) {
     const taskKey = `${period.reportType}-${shopId}-${period.beginDate}-${period.endDate}`;
     try {
       reportGateway.register({ key: taskKey, shopId, ...period, requestId });
-      const result = await createOrReadReport(shop, period, taskKey);
+      const result = await createFreshReport(shop, period, taskKey);
       sendJson(response, 200, result);
     } catch (error) {
       sendError(response, 502, error instanceof Error ? error.message : String(error));

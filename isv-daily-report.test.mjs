@@ -25,6 +25,7 @@ import {
   parseReportRequestPeriod,
   periodDatesEnding,
   aggregateDailyRows,
+  resolveRequestedDailyData,
 } from './isv-daily-report.mjs';
 
 const firstShop = {
@@ -177,6 +178,46 @@ test('native page periods accept reporting lag while preserving exact period len
   assert.equal(parseReportRequestPeriod({ ...dailyRequest, postData: JSON.stringify({ ...weeklyBody, beginDate: '20260709' }) }, '1330475849', 'weekly'), null);
 });
 
+test('daily data uses the page response when it matches the requested date', async () => {
+  const requestedPeriod = resolveReportPeriod('daily', new Date(2026, 6, 18, 8));
+  const captured = { row: { shop_id: 1 }, period: requestedPeriod, requestTemplate: {} };
+  const result = await resolveRequestedDailyData({
+    captured, requestedPeriod, shopId: '1', fetchHistoricalRow: async () => assert.fail('must not replay'),
+  });
+  assert.equal(result, captured);
+});
+
+test('daily data replays the exact requested date when the page period lags', async () => {
+  const requestedPeriod = resolveReportPeriod('daily', new Date(2026, 6, 18, 8));
+  const captured = {
+    row: { shop_id: 1, gross_amt: 16 },
+    period: { ...requestedPeriod, beginDate: '20260716', endDate: '20260716' },
+    requestTemplate: { url: 'https://example.test', body: {} },
+  };
+  const calls = [];
+  const result = await resolveRequestedDailyData({
+    captured, requestedPeriod, shopId: '1', timeoutMs: 30000,
+    fetchHistoricalRow: async (...args) => { calls.push(args); return { shop_id: 1, gross_amt: 17 }; },
+  });
+  assert.equal(result.row.gross_amt, 17);
+  assert.equal(result.period, requestedPeriod);
+  assert.equal(calls[0][3], '20260717');
+});
+
+test('daily data fails clearly when the requested date is unavailable', async () => {
+  const requestedPeriod = resolveReportPeriod('daily', new Date(2026, 6, 18, 8));
+  await assert.rejects(resolveRequestedDailyData({
+    captured: {
+      row: { shop_id: 1 },
+      period: { ...requestedPeriod, beginDate: '20260716', endDate: '20260716' },
+      requestTemplate: { url: 'https://example.test', body: {} },
+    },
+    requestedPeriod,
+    shopId: '1',
+    fetchHistoricalRow: async () => null,
+  }), /平台尚未返回.*20260717/);
+});
+
 test('weekly formatting and model input identify the aggregate seven-day period', () => {
   const period = resolveReportPeriod('weekly', new Date(2026, 6, 18, 8));
   const rawRow = { shop_id: 1330475849, shop_name: firstShop.shopName, gross_amt: 700, exp_uv: 1000 };
@@ -208,6 +249,16 @@ test('weekly fallback aggregates additive metrics and weighted conversion rates'
   assert.equal(result.clk_exp_rate, 0.1);
   assert.equal(result.ord_clk_rate, 11 / 40);
   assert.equal(result.dailyRows.length, 2);
+});
+
+test('weekly aggregation skips missing dates and records them', () => {
+  const result = aggregateDailyRows([
+    { date: '20260717', row: { shop_id: 1, shop_name: '店', gross_amt: 100, exp_uv: 100, clk_uv: 10, order_user_cnt: 2 } },
+    { date: '20260718', row: null },
+  ]);
+  assert.equal(result.gross_amt, 100);
+  assert.deepEqual(result.missingDates, ['20260718']);
+  assert.deepEqual(result.dailyRows.map((item) => item.date), ['20260717']);
 });
 
 test('parseReportResponse validates success and returns data rows', () => {

@@ -1,7 +1,10 @@
+import * as fs from 'node:fs';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import XLSX from 'xlsx';
+
+XLSX.set_fs(fs);
 
 const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sourcePath = resolve(process.env.SHOPS_SOURCE || 'E:\\christescuobermeyer\\taobaoshangou-shengxiaozhongdianpu\\淘宝闪购已建群_按运营分类.xlsx');

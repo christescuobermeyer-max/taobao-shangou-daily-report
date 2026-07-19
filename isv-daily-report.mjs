@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
+import * as fs from 'node:fs';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -11,6 +12,8 @@ import {
   generateReport,
   yesterdayYmd,
 } from './isv-report-lib.mjs';
+
+XLSX.set_fs(fs);
 
 export const OUTPUT_HEADERS = ['门店ID', '店铺名称', '运营', '昨日数据', '微信群名', '昨日日报'];
 
@@ -74,7 +77,7 @@ const FIELD_LABELS = {
   mkt_online_act_cnt: '营销在线活动数', mkt_online_act_cnt_mall_avg: '营销在线活动数大盘平均',
   collect_with_gift_act: '收藏有礼活动', full_reduce_act: '满减活动', burst_burstord_act: '爆单活动',
   burst_burstord_shop_add: '爆单活动店铺加成', burst_burstord_crowd_shop_add: '爆单活动人群店铺加成',
-  abnor_index_name_list: '异常指标名称列表', nested: '嵌套字段',
+  abnor_index_name_list: '异常指标名称列表', nested: '嵌套字段', missingDates: '缺失日期',
 };
 
 function cleanString(value) {
@@ -200,12 +203,16 @@ function numericValue(value) {
 
 export function aggregateDailyRows(dailyRows) {
   if (!Array.isArray(dailyRows) || dailyRows.length === 0) throw new Error('周报缺少逐日数据');
-  const first = dailyRows[0].row || {};
-  const result = { ...first, dailyRows };
+  const availableRows = dailyRows.filter((item) => item?.row && typeof item.row === 'object');
+  if (availableRows.length === 0) throw new Error('周报缺少可用逐日数据');
+  const first = availableRows[0].row;
+  const missingDates = dailyRows.filter((item) => !item?.row).map((item) => item.date).filter(Boolean);
+  const result = { ...first, dailyRows: availableRows };
+  if (missingDates.length) result.missingDates = missingDates;
   const sumFields = ['gross_amt', 'income_amt', 'actual_pay', 'expense_amt', 'exp_uv', 'exp_pv', 'clk_uv', 'clk_pv',
     'order_user_cnt', 'order_user_cnt_new', 'order_user_cnt_old', 'valid_order_cnt', 'mkt_act_ord_cnt',
     'mkt_act_ord_net_gmv', 'mkt_act_shop_subsidy_amt', 'rebuy_user_cnt_7d', 'rebuy_user_cnt_30d'];
-  for (const field of sumFields) result[field] = dailyRows.reduce((sum, item) => sum + numericValue(item.row?.[field]), 0);
+  for (const field of sumFields) result[field] = availableRows.reduce((sum, item) => sum + numericValue(item.row?.[field]), 0);
   const exp = numericValue(result.exp_uv);
   const clk = numericValue(result.clk_uv);
   const orders = numericValue(result.order_user_cnt);
@@ -714,9 +721,35 @@ export async function fetchHistoricalDailyRow(session, requestTemplate, shopId, 
   return rows.find((item) => String(item?.shop_id ?? item?.shopId ?? '').trim() === String(shopId).trim()) || null;
 }
 
+function periodsMatch(actual, requested) {
+  return actual?.reportType === requested?.reportType
+    && actual?.beginDate === requested?.beginDate
+    && actual?.endDate === requested?.endDate;
+}
+
+export async function resolveRequestedDailyData({
+  session,
+  captured,
+  shopId,
+  timeoutMs,
+  requestedPeriod,
+  fetchHistoricalRow = fetchHistoricalDailyRow,
+}) {
+  if (periodsMatch(captured?.period, requestedPeriod)) return captured;
+  if (!captured?.requestTemplate) throw new Error(`门店 ${shopId} 缺少日报接口请求模板`);
+  const row = await fetchHistoricalRow(session, captured.requestTemplate, shopId, requestedPeriod.endDate, timeoutMs);
+  if (!row) throw new Error(`平台尚未返回门店 ${shopId} 的 ${requestedPeriod.endDate} 日数据`);
+  return { ...captured, row, period: requestedPeriod };
+}
+
+export async function fetchDailyReportData(session, shopId, timeoutMs, requestedPeriod) {
+  const captured = await fetchShopReportData(session, shopId, timeoutMs, requestedPeriod);
+  return resolveRequestedDailyData({ session, captured, shopId, timeoutMs, requestedPeriod });
+}
+
 export async function fetchWeeklyReportData(session, shopId, timeoutMs, requestedPeriod) {
   const native = await fetchShopReportData(session, shopId, timeoutMs, requestedPeriod);
-  if (native?.row) return native;
+  if (native?.row && periodsMatch(native.period, requestedPeriod)) return native;
 
   const dailyRequested = {
     reportType: REPORT_TYPES.DAILY,
@@ -730,13 +763,13 @@ export async function fetchWeeklyReportData(session, shopId, timeoutMs, requeste
   if (!latest?.row || !latest?.period?.endDate || !latest.requestTemplate) {
     throw new Error(`门店 ${shopId} 未找到最新可用日报数据`);
   }
-  const dates = periodDatesEnding(latest.period.endDate, 7);
-  const rowsByDate = new Map([[latest.period.endDate, latest.row]]);
+  const dates = periodDatesEnding(requestedPeriod.endDate, 7);
+  const rowsByDate = new Map();
+  if (dates.includes(latest.period.endDate)) rowsByDate.set(latest.period.endDate, latest.row);
   for (const date of dates) {
     if (rowsByDate.has(date)) continue;
     const row = await fetchHistoricalDailyRow(session, latest.requestTemplate, shopId, date, timeoutMs);
-    if (!row) throw new Error(`门店 ${shopId} 缺少 ${date} 日报数据，无法生成完整近7日周报`);
-    rowsByDate.set(date, row);
+    if (row) rowsByDate.set(date, row);
   }
   const dailyRows = dates.map((date) => ({ date, row: rowsByDate.get(date) }));
   return {
@@ -753,7 +786,9 @@ export async function fetchWeeklyReportData(session, shopId, timeoutMs, requeste
 }
 
 export async function fetchShopRow(session, shopId, timeoutMs = 15000, period = null) {
-  const result = await fetchShopReportData(session, shopId, timeoutMs, period);
+  const result = period?.reportType === REPORT_TYPES.DAILY
+    ? await fetchDailyReportData(session, shopId, timeoutMs, period)
+    : await fetchShopReportData(session, shopId, timeoutMs, period);
   return result?.row || null;
 }
 
@@ -823,6 +858,13 @@ async function run(options) {
   const env = { ...loadDotEnv(join(dirname(fileURLToPath(import.meta.url)), '.env')), ...process.env };
   const config = options.dryRun ? null : getReportConfig(env);
   const date = options.date || yesterdayYmd();
+  const dailyPeriod = {
+    reportType: REPORT_TYPES.DAILY,
+    periodLabel: '昨日',
+    dateType: 'day',
+    beginDate: date,
+    endDate: date,
+  };
   const outputRows = [];
   let session;
   let failed = 0;
@@ -835,7 +877,7 @@ async function run(options) {
       let report = '';
       try {
         const rawRow = await retryOperation(
-          () => fetchShopRow(session, sourceShop.shopId),
+          () => fetchShopRow(session, sourceShop.shopId, 15000, dailyPeriod),
           {
             retries: options.apiRetries,
             delayMs: options.apiRetryDelay,
