@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -45,6 +45,7 @@ const config = {
 };
 
 const shops = loadShops(join(DATA_DIR, 'shops.json'));
+const WEEKLY_SCHEDULE_PATH = join(DATA_DIR, 'weekly-schedule.json');
 const browserLimiter = createConcurrencyLimiter(1);
 const llmLimiter = createConcurrencyLimiter(config.llmConcurrency);
 const reportDeduper = createKeyedDeduper();
@@ -60,7 +61,43 @@ const state = {
   healthAt: 0,
   healthPromise: null,
   healthProbeOffset: 0,
+  weeklySchedule: null,
 };
+
+function beijingNow() { return new Date(Date.now() + 8 * 60 * 60 * 1000); }
+function compactDate(date) { return date.toISOString().slice(0, 10).replaceAll('-', ''); }
+function currentWeekStart() {
+  const date = beijingNow();
+  const day = date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() - ((day + 6) % 7));
+  return compactDate(date);
+}
+function nextResetAt() {
+  const date = beijingNow();
+  const day = date.getUTCDay();
+  date.setUTCDate(date.getUTCDate() + (8 - day) % 7 || 7);
+  date.setUTCHours(0, 0, 0, 0);
+  return new Date(date.getTime() - 8 * 60 * 60 * 1000).toISOString();
+}
+function loadWeeklySchedule() {
+  const weekStart = currentWeekStart();
+  let parsed = {};
+  if (existsSync(WEEKLY_SCHEDULE_PATH)) {
+    try { parsed = JSON.parse(readFileSync(WEEKLY_SCHEDULE_PATH, 'utf8')); } catch { parsed = {}; }
+  }
+  if (parsed.weekStart !== weekStart) {
+    const history = parsed.history && typeof parsed.history === 'object' ? parsed.history : {};
+    if (parsed.weekStart && parsed.sent && typeof parsed.sent === 'object') history[parsed.weekStart] = parsed.sent;
+    parsed = { weekStart, sent: {}, history };
+  }
+  if (!parsed.sent || typeof parsed.sent !== 'object') parsed.sent = {};
+  if (!parsed.history || typeof parsed.history !== 'object') parsed.history = {};
+  state.weeklySchedule = parsed;
+  writeFileSync(WEEKLY_SCHEDULE_PATH, JSON.stringify(parsed, null, 2));
+  return parsed;
+}
+function getWeeklySchedule() { return state.weeklySchedule || loadWeeklySchedule(); }
+function saveWeeklySchedule() { writeFileSync(WEEKLY_SCHEDULE_PATH, JSON.stringify(state.weeklySchedule, null, 2)); }
 
 function toPositiveInteger(value, fallback) {
   const parsed = Number(value);
@@ -237,6 +274,28 @@ function reportErrorCode(error) {
 
 function getShop(shopId) {
   return shops.get(String(shopId || '').trim()) || null;
+}
+
+function weeklyScheduleResult(url) {
+  const schedule = getWeeklySchedule();
+  const operator = String(url.searchParams.get('operator') || '').trim();
+  const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(10, Number.parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
+  const list = [...shops.values()]
+    .filter((shop) => !operator || shop.operator === operator)
+    .sort((a, b) => a.shopId.localeCompare(b.shopId))
+    .map((shop) => ({ ...shop, sentAt: schedule.sent[shop.shopId] || null, sent: Boolean(schedule.sent[shop.shopId]) }));
+  const start = (page - 1) * pageSize;
+  return { ok: true, weekStart: schedule.weekStart, resetAt: nextResetAt(), total: list.length, sentCount: list.filter((shop) => shop.sent).length, pendingCount: list.filter((shop) => !shop.sent).length, operators: [...new Set([...shops.values()].map((shop) => shop.operator).filter(Boolean))].sort(), page, pageSize, items: list.slice(start, start + pageSize) };
+}
+
+function markWeeklyScheduleSent(shopId) {
+  const shop = getShop(shopId);
+  if (!shop) return null;
+  const schedule = getWeeklySchedule();
+  schedule.sent[shop.shopId] = new Date().toISOString();
+  saveWeeklySchedule();
+  return { ...shop, sent: true, sentAt: schedule.sent[shop.shopId] };
 }
 
 function validateRequestedDate(period, bodyDate) {
@@ -445,6 +504,18 @@ async function handleRequest(request, response) {
     const requestId = String(url.searchParams.get('requestId') || '').trim();
     if (requestId && !isValidRequestId(requestId)) return sendError(response, 400, 'requestId 格式无效');
     sendJson(response, 200, reportGateway.snapshot(requestId));
+    return;
+  }
+  if (url.pathname === '/api/weekly-schedule' && request.method === 'GET') {
+    sendJson(response, 200, weeklyScheduleResult(url));
+    return;
+  }
+  if (url.pathname === '/api/weekly-schedule/mark' && request.method === 'POST') {
+    let body;
+    try { body = JSON.parse(await readBody(request)); } catch (error) { return sendError(response, 400, error.message || '提交内容无效'); }
+    const item = markWeeklyScheduleSent(String(body?.shopId || '').trim());
+    if (!item) return sendError(response, 404, '未找到该门店');
+    sendJson(response, 200, { ok: true, item, schedule: weeklyScheduleResult(new URL('http://local/')) });
     return;
   }
   const shopMatch = /^\/api\/shop\/(\d{5,20})$/.exec(url.pathname);

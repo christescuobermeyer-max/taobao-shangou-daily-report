@@ -3,6 +3,7 @@ cloud/.env
 data/shops.json
 data/reports/
 data/gateway-metrics.json
+data/weekly-schedule.json
 logs/
 node_modules/
 .playwright-cli/
