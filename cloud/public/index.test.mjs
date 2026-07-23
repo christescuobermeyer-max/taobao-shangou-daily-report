@@ -27,7 +27,7 @@ test('user-facing copy hides internal implementation terms', () => {
 });
 
 test('weekly sending schedule exposes navigation, operator filter, counts, and pagination', () => {
-  for (const id of ['navReports', 'navSchedule', 'scheduleView', 'operatorFilter', 'operatorProgress', 'sentCount', 'pendingCount', 'resetCountdown', 'scheduleRows', 'schedulePrev', 'scheduleNext', 'scheduleReport', 'scheduleCopyGroup', 'scheduleCopyReport']) {
+  for (const id of ['navReports', 'navSchedule', 'scheduleLayout', 'scheduleView', 'operatorFilter', 'operatorProgress', 'sentCount', 'pendingCount', 'resetCountdown', 'scheduleRows', 'schedulePrev', 'scheduleNext', 'scheduleReport', 'scheduleCopyGroup', 'scheduleCopyReport']) {
     assert.match(html, new RegExp(`id=["']${id}["']`));
   }
   assert.match(html, /\/api\/weekly-schedule/);
@@ -39,6 +39,7 @@ test('weekly sending schedule exposes navigation, operator filter, counts, and p
   assert.doesNotMatch(html, /fill\.style\.width/);
   assert.match(html, /生成周报/);
   assert.match(html, /reportType:'weekly'/);
+  assert.match(html, /class=["']panel schedule-report["']/);
 });
 
 test('report requests carry a generated requestId and gateway polling is non-overlapping', () => {
