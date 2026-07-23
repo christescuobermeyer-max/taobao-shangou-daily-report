@@ -35,6 +35,8 @@ test('weekly sending schedule exposes navigation, operator filter, counts, and p
   assert.match(html, /每周一自动开始新一轮统计/);
   assert.match(html, /operatorStats/);
   assert.match(html, /各运营发送进度/);
+  assert.match(html, /operator-card-summary/);
+  assert.doesNotMatch(html, /fill\.style\.width/);
 });
 
 test('report requests carry a generated requestId and gateway polling is non-overlapping', () => {
