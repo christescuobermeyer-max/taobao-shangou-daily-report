@@ -96,7 +96,11 @@ function loadWeeklySchedule() {
   writeFileSync(WEEKLY_SCHEDULE_PATH, JSON.stringify(parsed, null, 2));
   return parsed;
 }
-function getWeeklySchedule() { return state.weeklySchedule || loadWeeklySchedule(); }
+function getWeeklySchedule() {
+  const weekStart = currentWeekStart();
+  if (!state.weeklySchedule || state.weeklySchedule.weekStart !== weekStart) return loadWeeklySchedule();
+  return state.weeklySchedule;
+}
 function saveWeeklySchedule() { writeFileSync(WEEKLY_SCHEDULE_PATH, JSON.stringify(state.weeklySchedule, null, 2)); }
 
 function toPositiveInteger(value, fallback) {
