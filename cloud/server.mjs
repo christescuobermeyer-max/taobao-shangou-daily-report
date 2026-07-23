@@ -285,12 +285,18 @@ function weeklyScheduleResult(url) {
   const operator = String(url.searchParams.get('operator') || '').trim();
   const page = Math.max(1, Number.parseInt(url.searchParams.get('page') || '1', 10) || 1);
   const pageSize = Math.min(100, Math.max(10, Number.parseInt(url.searchParams.get('pageSize') || '20', 10) || 20));
-  const list = [...shops.values()]
-    .filter((shop) => !operator || shop.operator === operator)
+  const allItems = [...shops.values()]
     .sort((a, b) => a.shopId.localeCompare(b.shopId))
     .map((shop) => ({ ...shop, sentAt: schedule.sent[shop.shopId] || null, sent: Boolean(schedule.sent[shop.shopId]) }));
+  const list = allItems.filter((shop) => !operator || shop.operator === operator);
+  const operators = [...new Set(allItems.map((shop) => shop.operator).filter(Boolean))].sort();
+  const operatorStats = operators.map((name) => {
+    const operatorItems = allItems.filter((shop) => shop.operator === name);
+    const sentCount = operatorItems.filter((shop) => shop.sent).length;
+    return { operator: name, total: operatorItems.length, sentCount, pendingCount: operatorItems.length - sentCount };
+  });
   const start = (page - 1) * pageSize;
-  return { ok: true, weekStart: schedule.weekStart, resetAt: nextResetAt(), total: list.length, sentCount: list.filter((shop) => shop.sent).length, pendingCount: list.filter((shop) => !shop.sent).length, operators: [...new Set([...shops.values()].map((shop) => shop.operator).filter(Boolean))].sort(), page, pageSize, items: list.slice(start, start + pageSize) };
+  return { ok: true, weekStart: schedule.weekStart, resetAt: nextResetAt(), total: list.length, sentCount: list.filter((shop) => shop.sent).length, pendingCount: list.filter((shop) => !shop.sent).length, operators, operatorStats, page, pageSize, items: list.slice(start, start + pageSize) };
 }
 
 function markWeeklyScheduleSent(shopId) {
